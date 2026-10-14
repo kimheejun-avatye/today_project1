@@ -1,0 +1,15 @@
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+SQLAlchemy>=2.0,<2.1
+psycopg[binary]>=3.2,<4
+argon2-cffi>=23.1,<26
+PyJWT>=2.9,<3
+cryptography>=43,<47
+httpx>=0.27,<1
+email-validator>=2.2,<3
+google-auth>=2.35,<3
+requests>=2.32,<3
+pytest>=8,<9
+captcha>=0.7,<1
+Pillow>=10.4,<12
+python-dotenv>=1,<2
