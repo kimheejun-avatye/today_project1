@@ -13,6 +13,18 @@ export function csrf() {
   );
 }
 
+// 화면이 상태 코드와 재시도 대기 시간으로 오류를 구분할 수 있게 합니다.
+export class ApiError extends Error {
+  status: number;
+  retryAfter: number | null;
+
+  constructor(message: string, status: number, retryAfter: number | null) {
+    super(message);
+    this.status = status;
+    this.retryAfter = retryAfter;
+  }
+}
+
 export async function api(
   path: string,
   method = "GET",
@@ -41,10 +53,14 @@ export async function api(
   const result = await response.json();
   if (!response.ok) {
     if (response.status === 401 && !path.startsWith("/auth/")) onUnauthorized();
-    throw Error(
+    const header = response.headers.get("Retry-After");
+    const seconds = Number(header);
+    throw new ApiError(
       typeof result.detail === "string"
         ? result.detail
         : "입력값을 확인해주세요.",
+      response.status,
+      header && Number.isFinite(seconds) ? seconds : null,
     );
   }
   return result;
