@@ -5,9 +5,10 @@ from sqlalchemy import select
 from app.models import Limit, now
 
 
-def fail(db, status, message):
+def fail(db, status, message, retry_after=None):
     db.commit()  # Failed attempts must survive an HTTP error.
-    raise HTTPException(status, message)
+    headers = {"Retry-After": str(int(retry_after))} if retry_after else None
+    raise HTTPException(status, message, headers=headers)
 
 
 def locked(db, model, value):
