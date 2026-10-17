@@ -3,6 +3,7 @@ import {
   value,
   toast,
   localDate,
+  seoulToday,
   on,
   escape,
   button,
@@ -44,7 +45,7 @@ export async function calendar() {
       (_, i) => {
         const key = `${state.month}-${String(i + 1).padStart(2, "0")}`;
         const d = entries.find((e) => e.date === key);
-        return `<button data-day="${key}" class="${state.day === key ? "selected" : ""} ${key === localDate(new Date()) ? "today" : ""}">${i + 1}<small>${d ? (d.shared ? "●" : "•") : " "}</small></button>`;
+        return `<button data-day="${key}" class="${state.day === key ? "selected" : ""} ${key === seoulToday() ? "today" : ""}">${i + 1}<small>${d ? (d.shared ? "●" : "•") : " "}</small></button>`;
       },
     ).join(
       "",

@@ -27,6 +27,7 @@ class Diary(Base):
         UniqueConstraint("member_id", "diary_date"),
         CheckConstraint("status IN ('DRAFT','FINAL')"),
         CheckConstraint("NOT is_shared OR status = 'FINAL'"),
+        CheckConstraint("length(diary_date) = 10 AND substr(diary_date, 5, 1) = '-' AND substr(diary_date, 8, 1) = '-'"),
     )
 
 

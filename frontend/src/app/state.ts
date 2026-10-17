@@ -1,5 +1,5 @@
 import type { User, Diary, Config } from "../shared/types/index";
-import { localDate } from "../shared/lib/dom";
+import { seoulToday } from "../shared/lib/dom";
 
 interface AppState {
   root: HTMLDivElement;
@@ -19,7 +19,7 @@ interface AppState {
   captchaTimer: number | undefined;
 }
 
-const today = localDate(new Date());
+const today = seoulToday();
 
 export const state: AppState = {
   root: document.querySelector<HTMLDivElement>("#app")!,
