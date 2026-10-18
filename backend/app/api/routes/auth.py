@@ -65,14 +65,16 @@ def request_email(data: EmailRequest, request: Request, db=Depends(db_session)):
     address = request.client.host if request.client else "unknown"
     ip = get_limit(db, "mail-ip:" + digest(address))
     if ip.count >= 20:
-        fail(db, 429, "메일 요청이 많습니다. 15분 후 다시 시도해주세요.")
+        # 15분 집계 창이 끝날 때까지 남은 초
+        fail(db, 429, "메일 요청이 많습니다. 15분 후 다시 시도해주세요.", retry_after=max(1, ip.started_at + 900 - now()))
     ip.count += 1
     existing = db.scalar(select(Member).where(Member.email == email))
     if data.purpose == "SIGNUP" and existing:
         fail(db, 409, "이미 가입된 이메일입니다")
     limit = get_limit(db, "mail:" + email + ":" + data.purpose)
     if limit.last_sent_at and now() - limit.last_sent_at < 60:
-        fail(db, 429, "인증번호는 1분 간격으로 요청할 수 있습니다.")
+        # 마지막 발송 후 60초까지 남은 초
+        fail(db, 429, "인증번호는 1분 간격으로 요청할 수 있습니다.", retry_after=max(1, 60 - (now() - limit.last_sent_at)))
     limit.last_sent_at = now()
     # 제한 기록의 잠금을 기다리는 동안 회원 상태가 바뀌었을 수 있어 다시 조회합니다.
     existing = db.scalar(select(Member).where(Member.email == email))
@@ -168,7 +170,8 @@ def login(
         get_limit(db, "login-ip:" + digest(address)),
     ]
     if any(x.blocked_until > now() for x in limits):
-        fail(db, 429, "잠시 기다린 뒤 다시 로그인해주세요.")
+        # 이메일·IP 차단 중 더 늦게 풀리는 쪽까지 남은 초
+        fail(db, 429, "잠시 기다린 뒤 다시 로그인해주세요.", retry_after=max(1, max(x.blocked_until for x in limits) - now()))
     member = db.scalar(select(Member).where(Member.email == email))
     if not password_matches(member.password_hash if member else None, data.password):
         for item in limits:

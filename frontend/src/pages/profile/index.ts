@@ -1,7 +1,7 @@
 import { profileHtml } from "./templates";
 import { state } from "../../app/state";
-import { on, catchError, value, toast } from "../../shared/lib/dom";
-import { api } from "../../shared/api/client";
+import { on, catchError, value, toast, cooldown } from "../../shared/lib/dom";
+import { api, ApiError } from "../../shared/api/client";
 import { loadCaptcha, resetCaptcha } from "../auth/captcha";
 import { renderAuth } from "../auth/index";
 import { script } from "../../shared/lib/external";
@@ -38,6 +38,14 @@ export function profile() {
           document.querySelector("#email-status")!.textContent = proof.dev_code
             ? `개발용 인증번호: ${proof.dev_code}`
             : proof.message;
+        } catch (err) {
+          // 서버가 대기 시간을 알려주면 그동안 버튼을 잠급니다.
+          if (err instanceof ApiError && err.retryAfter)
+            cooldown(
+              document.querySelector<HTMLButtonElement>("#email-send")!,
+              err.retryAfter,
+            );
+          throw err;
         } finally {
           resetCaptcha();
         }
