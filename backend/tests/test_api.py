@@ -105,6 +105,42 @@ def test_authorization_diary_conflict_and_comments(client):
     assert post(client,f'/community/{did}/comments',{'content':'hello'}).status_code==200
     assert len(client.get(f'/api/community/{did}/comments').json())==1
 
+def test_monthly_diaries_returns_own_entries_in_date_order(client):
+    from app.models import Diary, Member
+    signup(client);login(client)
+    body={'content':'일기','emotion':'좋음','status':'DRAFT','shared':False,'version':0}
+    headers={'X-CSRF-Token':client.cookies.get('csrf')}
+    for day in ('2026-10-19','2026-10-01','2026-11-01'):
+        response=client.put('/api/diaries/'+day,json=body,headers=headers)
+        assert response.status_code==200,response.text
+    with Session() as db:
+        other=Member(email='other@example.com',name='Other',google_subject='other-google')
+        db.add(other);db.flush()
+        db.add(Diary(member_id=other.id,diary_date='2026-10-02',content='다른 회원의 일기'))
+        db.commit()
+    response=client.get('/api/diaries',params={'month':'2026-10'})
+    assert response.status_code==200,response.text
+    assert [entry['date'] for entry in response.json()]==['2026-10-01','2026-10-19']
+
+@pytest.mark.parametrize('month',[None,'','2026-1','2026/10','x2026-10','2026-10x','2026-10\n','2026-00','2026-13','2026-99'])
+@pytest.mark.parametrize('authenticated',[False,True])
+def test_monthly_diaries_rejects_invalid_month_query(client,month,authenticated):
+    if authenticated:
+        signup(client);login(client)
+    response=client.get('/api/diaries',params={} if month is None else {'month':month})
+    assert response.status_code==422,response.text
+    assert response.json()['detail'][0]['loc']==['query','month']
+
+@pytest.mark.parametrize('month',['2026-01','2026-09','2026-10','2026-12'])
+def test_monthly_diaries_accepts_valid_month_range(client,month):
+    signup(client);login(client)
+    response=client.get('/api/diaries',params={'month':month})
+    assert response.status_code==200,response.text
+    assert response.json()==[]
+
+def test_monthly_diaries_valid_month_requires_login(client):
+    assert client.get('/api/diaries',params={'month':'2026-10'}).status_code==401
+
 def test_repeat_states_are_separate_and_future_without_diary(client):
     signup(client);login(client)
     assert post(client,'/tasks',{'title':'운동','day':'2026-10-13','recurring':True}).status_code==200
