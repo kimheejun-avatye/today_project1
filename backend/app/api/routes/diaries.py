@@ -1,8 +1,8 @@
 """diaries API. 트랜잭션의 커밋과 롤백은 db_session이 담당합니다."""
 
-import re
 from datetime import date
-from fastapi import Depends, Request, HTTPException
+from typing import Annotated
+from fastapi import Depends, Query, Request, HTTPException
 from sqlalchemy import select
 from app.db.session import db_session
 from app.models import Diary, now
@@ -16,10 +16,12 @@ router = APIRouter(tags=["diaries"])
 
 
 @router.get("/api/diaries")
-def diaries(request: Request, month: str, db=Depends(db_session)):
+def diaries(
+    request: Request,
+    month: Annotated[str, Query(pattern=r"^\d{4}-(0[1-9]|1[0-2])$")],
+    db=Depends(db_session),
+):
     m, _ = current(request, db)
-    if not re.fullmatch(r"\d{4}-\d{2}", month):
-        raise HTTPException(400, "월 형식 오류")
     return [
         diary_json(d)
         for d in db.scalars(
