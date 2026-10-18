@@ -2,12 +2,11 @@
 
 import argparse
 import json
-from sqlalchemy import delete, func, select, update, or_
+from sqlalchemy import delete, select
 from app.models import (
     Verification,
     CaptchaChallenge,
     Limit,
-    LoginSession,
     RefreshToken,
     now,
 )
@@ -37,43 +36,12 @@ def cleanup(db, retention_hours=24, dry_run=False):
         result[model.__tablename__] = len(ids)
         if ids and not dry_run:
             db.execute(delete(model).where(key.in_(ids)))
-    sessions = list(
-        db.scalars(
-            select(LoginSession.id)
-            .where(
-                or_(LoginSession.expires_at < cutoff, LoginSession.revoked_at < cutoff)
-            )
-            .with_for_update(skip_locked=True)
-        )
-    )
-    result["login_sessions"] = len(sessions)
-    result["refresh_tokens"] = db.scalar(
-        select(func.count())
-        .select_from(RefreshToken)
-        .where(RefreshToken.session_id.in_(sessions))
-    )
-    if sessions and not dry_run:
-        # Remove entire token chains in one statement before their parent sessions.
-        db.execute(delete(RefreshToken).where(RefreshToken.session_id.in_(sessions)))
-        db.execute(delete(LoginSession).where(LoginSession.id.in_(sessions)))
-    expired_payloads = list(
-        db.scalars(
-            select(RefreshToken.id)
-            .where(
-                RefreshToken.retry_payload.is_not(None),
-                RefreshToken.retry_until < timestamp,
-                RefreshToken.session_id.not_in(sessions),
-            )
-            .with_for_update(skip_locked=True)
-        )
-    )
-    result["retry_payloads"] = len(expired_payloads)
-    if expired_payloads and not dry_run:
-        db.execute(
-            update(RefreshToken)
-            .where(RefreshToken.id.in_(expired_payloads))
-            .values(retry_payload=None)
-        )
+    # 사용 거절은 요청 시 만료 검사로 즉시 처리한다. 여기서는 쌓인 만료 행만 물리적으로 정리한다.
+    ids = list(db.scalars(select(RefreshToken.id).where(RefreshToken.expires_at <= timestamp)
+                          .with_for_update(skip_locked=True)))
+    result["refresh_tokens"] = len(ids)
+    if ids and not dry_run:
+        db.execute(delete(RefreshToken).where(RefreshToken.id.in_(ids)))
     return result
 
 

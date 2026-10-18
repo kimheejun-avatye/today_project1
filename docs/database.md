@@ -29,15 +29,14 @@ Redis나 별도 인증 저장소는 두지 않는다. 회원 생성과 인증 �
 - 저장된 날짜별 할 일의 제목은 당시 값을 보관한다. 미생성 날짜의 제목 이력은 현재 구조만으로 보존되지 않는다.
 - 인증 성공과 최종 사용 완료를 구분한다. 재전송해도 남용 제한 기록은 별도로 유지한다.
 - 외래키는 연결의 유효성을 보장하며 요청자의 접근 권한은 API에서 검사한다.
-- 날짜마다 테이블을 만들지 않는다. 하나의 DB 안에 아래 10개 테이블을 둔다.
+- 날짜마다 테이블을 만들지 않는다. 하나의 DB 안에 아래 9개 테이블을 둔다.
 
 ## 4. 전체 관계
 
 ```text
 members
  ├─ email_verifications  (가입 전에는 member_id 없음)
- ├─ login_sessions
- │    └─ refresh_tokens ── previous_id로 이전 토큰 참조
+ ├─ refresh_tokens (회원당 현재 토큰 하나)
  ├─ diaries
  │    └─ comments ── 작성자는 members 참조
  ├─ recurring_tasks
@@ -111,33 +110,16 @@ key가 제한 단위를 식별한다. count와 시간 정보를 관리하며 재
 | `blocked_until` | `Integer` | 필수; 기본값 0 |
 | `last_sent_at` | `Integer` | 필수; 기본값 0 |
 
-### `login_sessions` — 서버 로그인 상태
+### `refresh_tokens` — 현재 재발급 토큰
 
-revoked_at IS NULL인 행은 회원당 하나만 허용하는 부분 고유 인덱스가 있다. 만료 여부도 별도 검사해야 한다. refresh_revoked_at은 재발급만 차단하는 상태이며 전체 종료와 구분한다. member_id 조회 인덱스가 있다.
+로그인 세션 테이블과 교체 이력은 제거했다. 새 로그인은 기존 행을 삭제하고 새 행을 만든다. 재발급은 digest만 교체하며 최초 로그인부터 4시간 만료 시각은 유지한다.
 
-| 컬럼 | 현재 모델 타입 | NULL·제약·기본값 |
+| 컬럼 | 타입 | 제약 |
 |---|---|---|
-| `id` | `String(36)` | PK; 필수 |
-| `member_id` | `참조 PK와 같은 타입` | 필수; ForeignKey('members.id') |
-| `expires_at` | `Integer` | 필수 |
-| `revoked_at` | `Integer` | NULL 허용 |
-| `refresh_revoked_at` | `Integer` | NULL 허용 |
-| `csrf_digest` | `String(64)` | 필수 |
-
-### `refresh_tokens` — 재발급 토큰 교체 이력
-
-digest와 previous_id는 각각 고유하다. 최초 previous_id는 NULL이다. session_id 조회 인덱스가 있다. retry_payload는 5초 유예 동안 같은 응답을 반환하기 위한 인증 암호문이다. 무작위 토큰 검증값과 구분하며 유예가 끝난 암호문은 매시간 정리한다. 토큰 행 자체는 로그인 종료·만료 후 24시간까지 유지해 재사용 탐지에 사용한다.
-
-| 컬럼 | 현재 모델 타입 | NULL·제약·기본값 |
-|---|---|---|
-| `id` | `String(36)` | PK; 필수 |
-| `session_id` | `참조 PK와 같은 타입` | 필수; ForeignKey('login_sessions.id') |
-| `digest` | `String(64)` | 필수; 고유 |
-| `previous_id` | `참조 PK와 같은 타입` | NULL 허용; 고유; ForeignKey('refresh_tokens.id') |
-| `expires_at` | `Integer` | 필수 |
-| `rotated_at` | `Integer` | NULL 허용 |
-| `retry_until` | `Integer` | NULL 허용 |
-| `retry_payload` | `Text` | NULL 허용 |
+| `id` | String(36) | 기본키 |
+| `member_id` | Integer | 필수, members.id 외래키, 고유 |
+| `digest` | String(64) | 필수, 고유 |
+| `expires_at` | Integer | 필수, 만료 정리용 인덱스 |
 
 ### `diaries` — 날짜별 일기
 
@@ -244,9 +226,8 @@ diary_id는 ON DELETE CASCADE이므로 일기 삭제 시 댓글도 삭제한다.
 | 공유 취소 | 비공개로 변경, 공개 조회·댓글 작성 차단 | 보관 댓글 재공개 정책 |
 | 회원 탈퇴 | 기능 미제공 | 연관 기록 삭제·보존·익명화와 FK 동작 |
 | 만료 이메일 인증·캡차 | 만료 후 24시간 보관, 매시간 정리 | 실행 결과 점검 |
-| 종료·만료 로그인·토큰 | 종료 또는 만료 후 24시간에 토큰 체인을 먼저 지우고 로그인 삭제 | 활성 로그인 토큰 이력 보존 |
+| Refresh 토큰 | 로그아웃 시 삭제, 만료 시 다음 정리 작업에서 삭제 | 이전 토큰 이력 없음 |
 | 요청 제한 | 15분 집계·차단·60초 재발송 대기가 모두 끝난 뒤 24시간 | 매시간 정리 |
-| 재시도 응답 암호문 | 5초 유예 이후 사용 불가, 매시간 NULL 처리 | 토큰 행과 분리하여 정리 |
 
 만료 데이터가 남아 있다는 이유로 유효하게 취급하지 않는다. 서버 시간으로 만료를 확인한다. 매시간 정리가 정상 실행되면 대상이 된 후 다음 정시에 삭제되며, 잠긴 행은 다음 실행으로 미룬다. 장애가 있으면 실제 삭제가 늦어질 수 있어 실행 결과를 점검한다. 이 정책은 현재 DB 행의 보관 정책이며 기존 백업 파일 삭제를 의미하지 않는다.
 
@@ -317,3 +298,8 @@ diary_id는 ON DELETE CASCADE이므로 일기 삭제 시 댓글도 삭제한다.
 적용 후 로컬 API를 새 코드로 재시작했고 Supabase 연결을 포함한 시작이 성공했다. 실행 중인 OpenAPI의 일반 가입·Google 가입·프로필에서 생년월일·전화번호 필드가 제거된 것을 확인했다.
 
 초기 생성 SQL `001_supabase_schema.sql`은 최초 스키마 이력이다. 최신 상태를 재현할 때는 현재 모델과 후속 `002`~`004` 변경을 함께 확인한다. 초기 SQL만 실행한 상태를 최신 설계로 보지 않는다. 향후 변경도 기존 데이터 백업과 명시적인 마이그레이션으로 관리한다.
+
+## 2026-10-18 인증 구조 전환
+
+API를 중지한 뒤 backend에서 `.venv312/bin/python scripts/migrate_refresh_only.py` 실행.
+기존 로그인은 종료된다. 스크립트는 비공개 로컬 백업을 만들고, 같은 트랜잭션에서 006 SQL과 정리 함수를 적용한다. 인증 두 테이블 외 모든 행이 변경 전후 동일한지 확인하며 불일치 시 롤백한다. 이미 전환한 DB에는 재실행해도 현재 Refresh를 삭제하지 않는다.

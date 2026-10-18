@@ -32,6 +32,7 @@ npm run dev
 | 문서 | 읽을 때 |
 |---|---|
 | [전체 구조](docs/architecture.md) | API 책임, 코드 위치, 요청 처리 흐름 |
+| [이번 인증 구조 수정 내역](docs/auth-refactor-2026-10-18.md) | 변경 의도, 수정 파일, DB 적용 결과와 검증 |
 | [인증 정책](docs/authentication.md) | 이메일 인증, 가입, 로그인, Google, 토큰 |
 | [DB 설계](docs/database.md) | 10개 테이블의 모든 컬럼·관계·제약 |
 | [설계 결정](docs/decisions.md) | 왜 선택했는지, 다른 대안과 한계 |
@@ -45,7 +46,7 @@ npm run dev
 
 1. `backend/app/main.py`: 앱 시작과 API 등록을 확인한다.
 2. `backend/app/api/routes/auth.py`: 가입 요청의 흐름을 읽고, `schemas/auth.py`와 `models/auth.py`에서 입력과 저장 구조를 확인한다.
-3. `backend/app/services/refresh.py`: 토큰 회전과 재사용 차단을 확인한다.
+3. `backend/app/services/refresh.py`: 단일 Refresh 교체와 로그아웃 처리를 확인한다.
 4. `frontend/src/main.ts` → `app/application.ts` → `pages/`: 초기 실행, 화면 전환, 기능별 동작 순서로 읽는다.
 
 가입·회원정보 화면의 HTML은 각 폴더의 `templates.ts`, 이벤트와 API 호출은 `index.ts`에 있다. 자세한 책임 구분은 [전체 구조](docs/architecture.md)를 참고한다.
@@ -56,3 +57,5 @@ npm run dev
 - 질문한 이유, 비교한 대안, 선택의 장단점, 바로잡은 오해, 결정 변경 과정은 요약본으로 대체하거나 삭제하지 않는다.
 - 현재 구현은 주제별 문서에서 설명하고, 당시의 고민과 계획은 [설계 과정 원본](docs/history/README.md)에서 구분해 관리한다.
 - 오래된 결정은 당시 기록임을 표시하고 최신 설명으로 연결한다. 단순히 현재 구현과 다르다는 이유로 삭제하지 않는다.
+
+인증 정책: Access 5분, Refresh 최초 로그인부터 4시간. 실제 DB 전환은 `backend/scripts/migrate_refresh_only.py`로 수행하며 기존 로그인만 초기화합니다. 상세 내용은 [인증 정책](docs/authentication.md)을 참고하세요.

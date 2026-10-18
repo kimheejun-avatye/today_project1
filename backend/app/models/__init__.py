@@ -3,7 +3,6 @@ from .auth import (
     Verification as Verification,
     CaptchaChallenge as CaptchaChallenge,
     Limit as Limit,
-    LoginSession as LoginSession,
     RefreshToken as RefreshToken,
 )
 from .diaries import Diary as Diary, Comment as Comment

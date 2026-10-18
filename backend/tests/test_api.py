@@ -7,7 +7,7 @@ os.environ['APP_ENV']='development'
 from fastapi.testclient import TestClient
 from app.main import app
 from app.db.session import Base,engine,Session
-from app.models import Verification,LoginSession,RefreshToken,now
+from app.models import Verification,RefreshToken,now
 from sqlalchemy import select
 import pytest
 import smtplib
@@ -59,7 +59,8 @@ def test_signup_one_use_and_session_revocation(client):
     assert r.status_code==400
     with TestClient(app,headers={'Origin':'http://localhost:5173'}) as other:
         login(other)
-        assert client.get('/api/me').status_code==401
+        assert client.get('/api/me').status_code==200
+        assert post(client,'/auth/refresh').status_code==401
         assert other.get('/api/me').status_code==200
         post(other,'/auth/logout')
         assert other.get('/api/me').status_code==401
@@ -71,21 +72,21 @@ def test_expired_code_and_forged_proof(client):
     assert post(client,'/auth/email/verify',{'id':data['id'],'flow':data['flow'],'code':data['dev_code']}).status_code==400
     assert post(client,'/auth/signup',{'id':data['id'],'flow':'forged','password':'long-password-123','name':'A','nickname':'A',}).status_code==400
 
-def test_refresh_rotation_grace_and_late_reuse(client):
-    signup(client);login(client);old=client.cookies.get('refresh');csrf=client.cookies.get('csrf')
-    assert post(client,'/auth/refresh').status_code==200
-    latest=client.cookies.get('refresh')
-    with TestClient(app,headers={'Origin':'http://localhost:5173','X-CSRF-Token':csrf}) as retry:
-        retry.cookies.set('refresh',old)
-        response=retry.post('/api/auth/refresh');assert response.status_code==200,response.text
-        assert response.cookies.get('refresh')==latest
+def test_refresh_rotation_rejects_previous_token(client):
+    signup(client);login(client)
+    old=client.cookies.get('refresh');proof=client.cookies.get('csrf')
     with Session() as db:
-        token=db.scalar(select(RefreshToken).where(RefreshToken.rotated_at.is_not(None)))
-        token.retry_until=now()-1;db.commit()
-    with TestClient(app,headers={'Origin':'http://localhost:5173','X-CSRF-Token':csrf}) as stale:
-        stale.cookies.set('refresh',old)
+        expiry=db.scalar(select(RefreshToken)).expires_at
+    assert post(client,'/auth/refresh').status_code==200
+    assert client.cookies.get('refresh') != old
+    with TestClient(app,headers={'Origin':'http://localhost:5173','X-CSRF-Token':proof}) as stale:
+        stale.cookies.set('refresh',old);stale.cookies.set('csrf',proof)
         assert stale.post('/api/auth/refresh').status_code==401
-    assert post(client,'/auth/refresh').status_code==401
+    assert post(client,'/auth/refresh').status_code==200
+    with Session() as db:
+        records=list(db.scalars(select(RefreshToken)))
+        assert len(records)==1 and records[0].expires_at==expiry
+
 
 def test_authorization_diary_conflict_and_comments(client):
     signup(client);login(client)
@@ -122,7 +123,8 @@ def test_csrf_origin_reset_and_google_only(client):
     assert client.post('/api/auth/logout',headers={'Origin':'https://evil.example','X-CSRF-Token':client.cookies.get('csrf')}).status_code==403
     proof=verification(client,purpose='PASSWORD_RESET')
     assert post(client,'/auth/password/reset',{**proof,'password':'new-password-123'}).status_code==200
-    assert client.get('/api/me').status_code==401
+    assert client.get('/api/me').status_code==200
+    assert post(client,'/auth/refresh').status_code==401
 
 def test_login_backoff(client):
     signup(client)
@@ -261,7 +263,7 @@ def test_google_login_does_not_create_a_member(client,monkeypatch):
     assert r.status_code==403 and '회원가입' in r.json()['detail']
     with Session() as db:
         assert db.scalar(select(Member).where(Member.google_subject=='new-google')) is None
-        assert db.scalar(select(LoginSession)) is None
+        assert db.scalar(select(RefreshToken)) is None
         assert all(c.consumed_at is None for c in db.scalars(select(CaptchaChallenge)))
 
 def test_google_signup_cannot_log_in_an_existing_member(client,monkeypatch):
@@ -275,7 +277,7 @@ def test_google_signup_cannot_log_in_an_existing_member(client,monkeypatch):
     assert client.get('/api/me').status_code==401
     with Session() as db:
         assert len(list(db.scalars(select(Member))))==1
-        assert len(list(db.scalars(select(LoginSession))))==1
+        assert len(list(db.scalars(select(RefreshToken))))==0
     assert post(client,'/auth/google',{'credential':'test','intent':'login'}).status_code==200
 
 def test_google_link_requires_reauthentication_and_csrf(client,monkeypatch):
@@ -456,34 +458,17 @@ def test_public_author_uses_nickname_not_name(client):
     assert client.get('/api/community').json()[0]['author']=='익명'
 
 
-def test_cleanup_login_chains_limits_and_retry_payloads(client):
-    from app.models import Member, Limit
+def test_cleanup_expired_refresh_preserves_member(client):
+    from app.models import Member
     from app.maintenance import cleanup
-    signup(client)
-    t=now()
+    signup(client);login(client)
     with Session.begin() as db:
-        member=db.scalar(select(Member))
-        for sid,expiry,revoked in [('old',t+1000,t-90000),('active',t+1000,None),('recent',t-60,t-1)]:
-            db.add(LoginSession(id=sid,member_id=member.id,expires_at=expiry,revoked_at=revoked,csrf_digest='x'))
-        db.flush()
-        for tid,sid,previous in [('r1','old',None),('r2','old','r1'),('a1','active',None)]:
-            db.add(RefreshToken(id=tid,session_id=sid,previous_id=previous,digest=tid,expires_at=t+1000,retry_until=t-1,retry_payload='encrypted'))
-            db.flush()
-        db.add(Limit(key='stale',started_at=t-91000,blocked_until=0,last_sent_at=0))
-        db.add(Limit(key='recent-limit',started_at=t-100,blocked_until=0,last_sent_at=0))
-        db.add(Limit(key='blocked',started_at=t-91000,blocked_until=t+100,last_sent_at=0))
-        db.flush()
-        preview=cleanup(db,dry_run=True)
-        assert preview['login_sessions']==1 and preview['refresh_tokens']==2
-        assert db.get(RefreshToken,'r1') is not None
-        cleanup(db)
-    with Session() as db:
-        assert db.get(LoginSession,'old') is None
-        assert db.get(RefreshToken,'r1') is None and db.get(RefreshToken,'r2') is None
-        assert db.get(LoginSession,'recent') is not None
-        assert db.get(RefreshToken,'a1').retry_payload is None
-        assert db.get(Limit,'stale') is None
-        assert db.get(Limit,'recent-limit') and db.get(Limit,'blocked')
+        db.scalar(select(RefreshToken)).expires_at=now()-1
+    with Session.begin() as db:
+        assert cleanup(db,dry_run=True)['refresh_tokens']==1
+        assert db.scalar(select(RefreshToken)) is not None
+        assert cleanup(db)['refresh_tokens']==1
+        assert db.scalar(select(Member)) is not None
 
 
 def test_explicit_profile_drop_preserves_other_data():

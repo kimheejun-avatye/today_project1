@@ -29,7 +29,7 @@ project1/
 │  │  │                        tasks, community, config
 │  │  ├─ api/serializers.py    응답 변환
 │  │  ├─ core/                 설정·보안·개인정보 정책
-│  │  ├─ services/             verification, sessions, google,
+│  │  ├─ services/             verification, tokens, google,
 │  │  │                        mail, captcha, refresh
 │  │  ├─ schemas/              영역별 요청 입력 모델
 │  │  ├─ models/               영역별 DB 테이블·제약
@@ -90,4 +90,4 @@ SMTP 발송과 DB 저장은 하나의 트랜잭션으로 묶이지 않는다. �
 
 `db/controls.py`의 `fail()`은 실패 횟수와 재사용 차단 기록을 커밋한 뒤 오류를 반환한다. 일반 예외로 바꾸면 차단 기록도 롤백될 수 있다. 반대로 회원 생성과 인증 소비는 실패 시 함께 롤백해야 한다. 두 경로의 차이를 유지한다.
 
-이메일 발송 앞뒤 처리와 재발급 유예에는 코드 주석으로 이유를 남겼다. 특히 5초 유예는 만료된 로그인 연장이 아니라 이미 회전한 직전 토큰에 같은 결과를 재전달하는 정책이다.
+이메일 발송과 토큰 교체·로그아웃 경쟁 처리에는 코드 주석으로 이유를 남겼다. 재발급 유예와 세션 테이블은 제거했으며 현재 정책은 인증 문서를 따른다.

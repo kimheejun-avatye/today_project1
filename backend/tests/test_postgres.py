@@ -140,28 +140,95 @@ def test_postgres_legacy_member_upgrade(pg):
         assert c.execute(text('SELECT id,email,privacy_consented_at FROM members')).one() == (10, 'legacy@example.com', None)
 
 
-def test_profile_removal_and_sql_retention(pg):
+def test_refresh_migration_and_retention(pg):
     from pathlib import Path
+    from scripts.migrate_refresh_only import migrate
     scoped, factory = pg
-    sql_dir = Path(__file__).resolve().parents[1] / 'sql'
     with scoped.begin() as c:
-        schema = c.scalar(text('SELECT current_schema()'))
-        c.execute(text('ALTER TABLE members ADD birth_date varchar(10), ADD phone varchar(30), ADD created_at integer'))
-        c.execute(text('ALTER TABLE login_sessions ADD created_at integer'))
-        c.execute(text("INSERT INTO members(id,email,name,nickname,password_hash,birth_date,phone,created_at) VALUES (1,'retention@example.com','private','public','hash','2000-01-01','test',1)"))
-        migration = (sql_dir/'002_remove_unused_profile.sql').read_text().replace('public.', schema+'.').replace('BEGIN;', '').replace('COMMIT;', '')
-        c.exec_driver_sql(migration)
-        c.exec_driver_sql(migration)
-        assert c.execute(text('SELECT id,name,nickname FROM members')).one() == (1,'private','public')
-        assert c.scalar(text("SELECT count(*) FROM information_schema.columns WHERE table_schema=:schema AND ((table_name='members' AND column_name IN ('birth_date','phone','created_at')) OR (table_name='login_sessions' AND column_name='created_at'))"), {'schema':schema}) == 0
-        t = now()
-        c.execute(text("INSERT INTO login_sessions(id,member_id,expires_at,revoked_at,csrf_digest) VALUES ('old',1,:old,:old,'x'), ('active',1,:future,NULL,'y')"), {'old':t-90000,'future':t+1000})
-        c.execute(text("INSERT INTO refresh_tokens(id,session_id,digest,expires_at,previous_id,retry_until,retry_payload) VALUES ('old1','old','old1',:old,NULL,NULL,NULL),('old2','old','old2',:old,'old1',NULL,NULL),('active1','active','active1',:old,NULL,:past,'ciphertext')"), {'old':t-90000,'past':t-10})
-        c.execute(text("INSERT INTO rate_limits(key,count,started_at,blocked_until,last_sent_at) VALUES ('stale',1,:old,0,0),('blocked',1,:old,:future,0),('recent',1,:recent,0,0)"), {'old':t-90000,'future':t+1000,'recent':t})
+        schema = c.scalar(text("SELECT current_schema()"))
+        c.exec_driver_sql("DROP TABLE refresh_tokens")
+        c.exec_driver_sql("CREATE TABLE login_sessions(id TEXT PRIMARY KEY, member_id INTEGER REFERENCES members(id))")
+        c.exec_driver_sql("CREATE TABLE refresh_tokens(id TEXT PRIMARY KEY, session_id TEXT REFERENCES login_sessions(id))")
+        c.exec_driver_sql("INSERT INTO members(id,email,name,nickname,password_hash) VALUES (1,'keep@example.com','keep','keep','test-hash')")
+        # Run the same SQL as production, within this isolated schema.
+        sql_dir=Path(__file__).resolve().parents[1]/'sql'
+        c.execute(text((sql_dir/'006_refresh_only.sql').read_text().replace('public.',schema+'.')))
         c.execute(text((sql_dir/'003_auth_retention.sql').read_text().replace('public.',schema+'.')))
-        result = c.scalar(text(f'SELECT {schema}.haru_cleanup_auth()'))
-        assert result == dict(email_verifications=0,captcha_challenges=0,rate_limits=1,login_sessions=1,refresh_tokens=2,retry_payloads=1)
-        assert c.execute(text('SELECT id,retry_payload FROM refresh_tokens')).one() == ('active1',None)
-        assert set(c.scalars(text('SELECT key FROM rate_limits'))) == {'blocked','recent'}
-        assert c.scalar(text('SELECT count(*) FROM members')) == 1
-        assert not any(c.scalar(text(f'SELECT {schema}.haru_cleanup_auth()')).values())
+        assert c.scalar(text('SELECT count(*) FROM members'))==1
+        c.execute(text("INSERT INTO refresh_tokens VALUES ('old',1,'hash',:expired)"),{'expired':now()-1})
+        result=c.scalar(text(f'SELECT {schema}.haru_cleanup_auth()'))
+        assert result['refresh_tokens']==1
+        assert c.scalar(text('SELECT count(*) FROM members'))==1
+        assert c.scalar(text("SELECT to_regclass(:name)"),{'name':schema+'.login_sessions'}) is None
+
+
+def test_concurrent_refresh_and_logout_cannot_restore_record(pg):
+    from app.models import RefreshToken
+    from app.services.refresh import rotate_refresh_token, revoke_refresh_token
+    from app.core.security import signed_claims, SECRET
+    from starlette.requests import Request
+    import jwt
+    scoped,factory=pg
+    identity=str(uuid.uuid4());raw=identity+'.secret'
+    with factory.begin() as db:
+        member=Member(email='race@example.com',name='race',nickname='race',password_hash='test-hash')
+        db.add(member);db.flush();mid=member.id
+        db.add(RefreshToken(id=identity,member_id=mid,digest=digest(raw),expires_at=now()+14400))
+    proof=jwt.encode(signed_claims('csrf',mid,identity,now()+14400),SECRET,algorithm='HS256')
+    request=Request({'type':'http','headers':[(b'x-csrf-token',proof.encode()),(b'cookie',('csrf='+proof).encode())]})
+    acquired=threading.Event();release=threading.Event()
+    def rotate():
+        with factory() as db:
+            db.execute(select(RefreshToken).where(RefreshToken.id==identity).with_for_update()).scalar_one()
+            acquired.set();assert release.wait(5)
+            return rotate_refresh_token(db,raw,request)
+    def logout():
+        with factory() as db:revoke_refresh_token(db,raw,request)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first=pool.submit(rotate)
+        assert acquired.wait(5)
+        second=pool.submit(logout)
+        release.set()
+        first.result(timeout=5);second.result(timeout=5)
+    with factory() as db:assert db.get(RefreshToken,identity) is None
+
+
+def test_two_refresh_requests_only_one_can_rotate(pg):
+    from app.models import RefreshToken
+    from app.services.refresh import rotate_refresh_token
+    from app.core.security import signed_claims, SECRET
+    from starlette.requests import Request
+    from fastapi import HTTPException
+    import jwt
+    _,factory=pg
+    identity=str(uuid.uuid4());raw=identity+'.secret'
+    with factory.begin() as db:
+        member=Member(email='double@example.com',name='double',nickname='double',password_hash='hash')
+        db.add(member);db.flush();mid=member.id
+        db.add(RefreshToken(id=identity,member_id=mid,digest=digest(raw),expires_at=now()+14400))
+    proof=jwt.encode(signed_claims('csrf',mid,identity,now()+14400),SECRET,algorithm='HS256')
+    request=Request({'type':'http','headers':[(b'x-csrf-token',proof.encode()),(b'cookie',('csrf='+proof).encode())]})
+    barrier=threading.Barrier(2)
+    def run():
+        with factory() as db:
+            barrier.wait(timeout=5)
+            try:rotate_refresh_token(db,raw,request);return 200
+            except HTTPException as e:return e.status_code
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert sorted(pool.map(lambda _:run(),range(2)))==[200,401]
+    with factory() as db:
+        assert db.scalar(select(func.count()).select_from(RefreshToken))==1
+
+
+def test_access_member_lookup_on_postgres(pg):
+    from app.core.security import access, current
+    from types import SimpleNamespace
+    from starlette.requests import Request
+    _,factory=pg
+    with factory.begin() as db:
+        member=Member(email='access@example.com',name='access',nickname='access',password_hash='hash')
+        db.add(member);db.flush();mid=member.id
+    raw=access(SimpleNamespace(member_id=mid,id=str(uuid.uuid4()),expires_at=now()+14400))
+    request=Request({'type':'http','method':'GET','headers':[(b'cookie',('access='+raw).encode())]})
+    with factory() as db:
+        assert current(request,db)[0].id==mid

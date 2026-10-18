@@ -2,17 +2,16 @@
 
 import secrets, uuid, hmac
 from fastapi import Depends, Request, Response, HTTPException
-from sqlalchemy import select, update
+from sqlalchemy import select, update, delete
 from app.db.session import db_session
-from app.models import Member, Verification, LoginSession, now
+from app.models import Member, Verification, RefreshToken, now
 from app.core.security import (
-    PRODUCTION,
     ph,
     digest,
     password_matches,
     current,
-    csrf,
     cookies,
+    clear_cookies,
 )
 from app.db.controls import fail, locked, get_limit
 from app.services import captcha as captcha_service
@@ -30,9 +29,9 @@ from app.schemas import (
     Reset,
 )
 from app.services.verification import email_key, proof_record
-from app.services.sessions import new_session
+from app.services.tokens import issue_tokens
 
-from app.services.refresh import rotate_refresh_token
+from app.services.refresh import rotate_refresh_token, revoke_refresh_token
 
 router = APIRouter(tags=["auth"])
 
@@ -181,24 +180,20 @@ def login(
         fail(db, 401, "이메일 또는 비밀번호를 확인해주세요.")
     limits[0].count = 0
     limits[0].blocked_until = 0
-    return new_session(db, member, response)
+    return issue_tokens(db, member, response)
 
 
 @router.post("/api/auth/refresh")
 def refresh(request: Request, response: Response, db=Depends(db_session)):
-    session, refresh_token, access_token = rotate_refresh_token(
-        db, request.cookies.get("refresh", ""), lambda session: csrf(request, session)
-    )
-    cookies(response, session, refresh_token, access_value=access_token)
+    token, raw = rotate_refresh_token(db, request.cookies.get("refresh", ""), request)
+    cookies(response, token, raw)
     return {"renewed": True}
 
 
 @router.post("/api/auth/logout")
 def logout(request: Request, response: Response, db=Depends(db_session)):
-    member, session = current(request, db)
-    session.revoked_at = now()
-    for key, path in [("access", "/"), ("refresh", "/api/auth"), ("csrf", "/")]:
-        response.delete_cookie(key, path=path, secure=PRODUCTION, samesite="lax")
+    revoke_refresh_token(db, request.cookies.get("refresh", ""), request)
+    clear_cookies(response)
     return {"ok": True}
 
 
@@ -211,8 +206,6 @@ def reset(data: Reset, db=Depends(db_session)):
     member.password_hash = ph.hash(data.password)
     v.consumed_at = now()
     db.execute(
-        update(LoginSession)
-        .where(LoginSession.member_id == member.id)
-        .values(revoked_at=now())
+        delete(RefreshToken).where(RefreshToken.member_id == member.id)
     )
     return {"message": "비밀번호를 변경했습니다. 다시 로그인해주세요."}

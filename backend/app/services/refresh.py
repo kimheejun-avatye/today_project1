@@ -1,77 +1,41 @@
-"""재발급 토큰 회전과 재시도 유예. DB 커밋은 요청의 트랜잭션에 맡깁니다."""
-
-import json
-import secrets
-import uuid
-from collections.abc import Callable
+"""Refresh 한 행의 해시만 교체한다. 이전 토큰 이력과 재시도 유예는 보관하지 않는다."""
+import secrets, hmac
 from fastapi import HTTPException
-from sqlalchemy import select, update
-from sqlalchemy.orm import Session
-from app.models import LoginSession, RefreshToken, now
-from app.core.security import digest, access, fernet
-from app.db.controls import fail, locked
+from sqlalchemy import delete, update
+from app.models import RefreshToken, now
+from app.core.security import digest, csrf
+from app.db.controls import locked
 
 
-def rotate_refresh_token(
-    db: Session, raw_token: str, validate_csrf: Callable[[LoginSession], None]
-) -> tuple[LoginSession, str, str]:
-    """로그인 기록, Refresh 원문, Access 토큰을 반환합니다.
-
-    CSRF 검증은 잠근 로그인 기록으로 수행합니다. 회전한 직전 토큰의 정상
-    재시도에는 같은 결과를 반환하지만, 유예 밖 재사용은 재발급을 차단합니다.
-    """
-    token = db.scalar(
-        select(RefreshToken).where(RefreshToken.digest == digest(raw_token))
-    )
-    if not token:
-        raise HTTPException(401, "다시 로그인해주세요.")
-    # 다른 재발급 요청과 같은 순서로 잠가 회전 결과가 갈라지지 않게 합니다.
-    session = locked(db, LoginSession, token.session_id)
-    token = locked(db, RefreshToken, token.id)
-    if (
-        not session
-        or session.revoked_at
-        or session.refresh_revoked_at
-        or session.expires_at <= now()
-        or token.expires_at <= now()
-    ):
+def rotate_refresh_token(db, raw_token, request):
+    identity = raw_token.partition(".")[0]
+    # 재발급·로그아웃이 같은 기록을 동시에 변경하지 않도록 잠근 뒤 검증한다.
+    token = locked(db, RefreshToken, identity)
+    if not token or token.expires_at <= now() or not hmac.compare_digest(token.digest, digest(raw_token)):
         raise HTTPException(401, "로그인이 종료되었습니다.")
-    validate_csrf(session)
-    # 5초는 만료 연장이 아니라 이미 회전한 토큰의 동일 응답 재전달 기간입니다.
-    if token.rotated_at:
-        successor = db.scalar(
-            select(RefreshToken).where(RefreshToken.previous_id == token.id)
-        )
-        if (
-            token.retry_until >= now()
-            and token.retry_payload
-            and successor
-            and not successor.rotated_at
-        ):
-            payload = json.loads(fernet.decrypt(token.retry_payload.encode()))
-            return session, payload["refresh"], payload["access"]
-        session.refresh_revoked_at = now()
-        token.retry_payload = None
-        fail(db, 401, "이전 토큰 재사용을 발견했습니다. 다시 로그인해주세요.")
-    db.execute(
-        update(RefreshToken)
-        .where(RefreshToken.session_id == session.id, RefreshToken.retry_until < now())
-        .values(retry_payload=None)
-    )
-    raw = secrets.token_urlsafe(48)
-    at = access(session)
-    db.add(
-        RefreshToken(
-            id=str(uuid.uuid4()),
-            session_id=session.id,
-            digest=digest(raw),
-            previous_id=token.id,
-            expires_at=session.expires_at,
-        )
-    )
-    token.rotated_at = now()
-    token.retry_until = now() + 5
-    token.retry_payload = fernet.encrypt(
-        json.dumps({"refresh": raw, "access": at}).encode()
-    ).decode()
-    return session, raw, at
+    csrf(request, token.id, token.member_id)
+    raw = token.id + "." + secrets.token_urlsafe(48)
+    # 기존 해시가 여전히 일치할 때만 갱신한다. 행 잠금이 없는 SQLite에서도 중복 회전을 막는다.
+    # expires_at은 갱신하지 않아 계속 사용해도 최초 로그인부터 4시간 뒤 종료된다.
+    result = db.execute(update(RefreshToken).where(RefreshToken.id == token.id,
+        RefreshToken.digest == digest(raw_token), RefreshToken.expires_at > now())
+        .values(digest=digest(raw)).execution_options(synchronize_session=False))
+    if result.rowcount != 1:
+        raise HTTPException(401, "다시 로그인해주세요.")
+    db.commit()
+    return token, raw
+
+
+def revoke_refresh_token(db, raw_token, request):
+    identity = raw_token.partition(".")[0]
+    if not raw_token:
+        return
+    # 회전 직후에도 같은 ID를 유지하므로, 이전 비밀값을 보낸 로그아웃도 해당 기록을 지울 수 있다.
+    # 이때 권한은 ID만 믿지 않고 서명된 CSRF와 회원 연결로 확인한다.
+    # 만료된 CSRF 허용은 기록 삭제에만 한정한다. Access 인증·재발급에는 적용하지 않는다.
+    csrf(request, identity, allow_expired=True)
+    token = locked(db, RefreshToken, identity)
+    if token:
+        csrf(request, identity, token.member_id, allow_expired=True)
+        db.execute(delete(RefreshToken).where(RefreshToken.id == identity))
+    db.commit()

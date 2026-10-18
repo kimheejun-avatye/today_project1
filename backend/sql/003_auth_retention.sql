@@ -7,13 +7,10 @@ AS $function$
 DECLARE
   current_second bigint := floor(extract(epoch FROM statement_timestamp()));
   cutoff bigint := current_second - 86400;
-  session_ids varchar[];
   verification_count integer;
   captcha_count integer;
   limit_count integer;
-  session_count integer;
   token_count integer;
-  payload_count integer;
 -- 실행부
 BEGIN
   -- [기능1] 만료된 이메일 인증 데이터 삭제
@@ -39,29 +36,16 @@ BEGIN
   ) DELETE FROM public.rate_limits WHERE key IN (SELECT key FROM candidates);
   GET DIAGNOSTICS limit_count = ROW_COUNT;
 
-  SELECT coalesce(array_agg(id), ARRAY[]::varchar[]) INTO session_ids FROM (
-    SELECT id FROM public.login_sessions WHERE expires_at < cutoff OR revoked_at < cutoff
-    FOR UPDATE SKIP LOCKED
-  ) AS candidates;
-  -- Entire chains are removed together; expired tokens of live sessions remain
-  -- available for replay detection. The parent session lock coordinates with refresh.
-  DELETE FROM public.refresh_tokens WHERE session_id = ANY(session_ids);
-  GET DIAGNOSTICS token_count = ROW_COUNT;
-  DELETE FROM public.login_sessions WHERE id = ANY(session_ids);
-  GET DIAGNOSTICS session_count = ROW_COUNT;
   WITH candidates AS (
-    SELECT id FROM public.refresh_tokens
-    WHERE retry_payload IS NOT NULL AND retry_until < current_second
+    SELECT id FROM public.refresh_tokens WHERE expires_at <= current_second
     FOR UPDATE SKIP LOCKED
-  ) UPDATE public.refresh_tokens SET retry_payload = NULL
-    WHERE id IN (SELECT id FROM candidates);
-  GET DIAGNOSTICS payload_count = ROW_COUNT;
+  ) DELETE FROM public.refresh_tokens WHERE id IN (SELECT id FROM candidates);
+  GET DIAGNOSTICS token_count = ROW_COUNT;
 
-  -- JSON으로 반환 
   RETURN jsonb_build_object('email_verifications', verification_count,
     'captcha_challenges', captcha_count, 'rate_limits', limit_count,
-    'login_sessions', session_count, 'refresh_tokens', token_count,
-    'retry_payloads', payload_count);
+    'refresh_tokens', token_count);
+
 END;
 
 

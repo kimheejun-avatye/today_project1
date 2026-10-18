@@ -11,7 +11,7 @@ from app.core.privacy import NOTICE, validate_consent
 from fastapi import APIRouter
 from app.schemas import GoogleInput
 from app.services.verification import email_key
-from app.services.sessions import new_session
+from app.services.tokens import issue_tokens
 from app.services.google import google_claim
 
 router = APIRouter(tags=["google"])
@@ -50,7 +50,7 @@ def google_login(
                 403,
                 "아직 가입되지 않은 Google 계정입니다. 회원가입을 먼저 진행해주세요.",
             )
-        return new_session(db, member, response)
+        return issue_tokens(db, member, response)
     email = email_key(claim["email"])
     if data.intent == "link":
         active, _ = current(request, db)
@@ -67,7 +67,7 @@ def google_login(
         ):
             raise HTTPException(409, "다른 Google 계정이 연결되어 있습니다.")
         active.google_subject = claim["sub"]
-        return new_session(db, active, response)
+        return issue_tokens(db, active, response)
     if member:
         raise HTTPException(
             409, "이미 가입된 Google 계정입니다. 로그인 화면에서 로그인해주세요."
@@ -91,4 +91,4 @@ def google_login(
     )
     db.add(member)
     db.flush()
-    return new_session(db, member, response)
+    return issue_tokens(db, member, response)
