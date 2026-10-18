@@ -11,6 +11,13 @@ export function localDate(d: Date) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+// 서비스의 '오늘'은 기기 시간대와 무관하게 KST(Asia/Seoul) 기준이다.
+export function seoulToday() {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Seoul" }).format(
+    new Date(),
+  );
+}
+
 export function toast(text: string) {
   let n = document.querySelector("#notice");
   if (!n) {
