@@ -6,8 +6,8 @@ import {
   reloginHtml,
 } from "./templates";
 import { state } from "../../app/state";
-import { on, catchError, value, toast } from "../../shared/lib/dom";
-import { api } from "../../shared/api/client";
+import { on, catchError, value, toast, cooldown } from "../../shared/lib/dom";
+import { api, ApiError } from "../../shared/api/client";
 import { render } from "../../app/application";
 import { loadCaptcha, resetCaptcha } from "./captcha";
 import { script } from "../../shared/lib/external";
@@ -94,6 +94,13 @@ export function renderAuth() {
           document.querySelector("#code-status")!.textContent = result.dev_code
             ? `개발용 인증번호: ${result.dev_code}`
             : result.message;
+        } catch (err) {
+          if (err instanceof ApiError && err.retryAfter)
+            cooldown(
+              document.querySelector<HTMLButtonElement>("#send-code")!,
+              err.retryAfter,
+            );
+          throw err;
         } finally {
           resetCaptcha();
         }
