@@ -95,6 +95,7 @@ export function renderAuth() {
             ? `개발용 인증번호: ${result.dev_code}`
             : result.message;
         } catch (err) {
+          // 서버가 대기 시간을 알려주면 그동안 버튼을 잠급니다.
           if (err instanceof ApiError && err.retryAfter)
             cooldown(
               document.querySelector<HTMLButtonElement>("#send-code")!,

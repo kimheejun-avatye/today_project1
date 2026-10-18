@@ -39,6 +39,7 @@ export function profile() {
             ? `개발용 인증번호: ${proof.dev_code}`
             : proof.message;
         } catch (err) {
+          // 서버가 대기 시간을 알려주면 그동안 버튼을 잠급니다.
           if (err instanceof ApiError && err.retryAfter)
             cooldown(
               document.querySelector<HTMLButtonElement>("#email-send")!,

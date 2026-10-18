@@ -53,6 +53,7 @@ export async function api(
   const result = await response.json();
   if (!response.ok) {
     if (response.status === 401 && !path.startsWith("/auth/")) onUnauthorized();
+    // 헤더가 없거나 숫자가 아니면 null로 둡니다.
     const header = response.headers.get("Retry-After");
     const seconds = Number(header);
     throw new ApiError(

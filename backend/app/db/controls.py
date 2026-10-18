@@ -7,6 +7,7 @@ from app.models import Limit, now
 
 def fail(db, status, message, retry_after=None):
     db.commit()  # Failed attempts must survive an HTTP error.
+    # 남은 대기 초가 있을 때만 클라이언트에 다음 시도 시점을 알려줍니다.
     headers = {"Retry-After": str(int(retry_after))} if retry_after else None
     raise HTTPException(status, message, headers=headers)
 

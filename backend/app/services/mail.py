@@ -88,11 +88,14 @@ def classify(error):
         delay = retry_delay()
         return 503, f"메일 서버에 연결하지 못했습니다. {delay}초 후 다시 시도해주세요.", delay
     text = message.decode(errors="replace") if isinstance(message, bytes) else str(message)
+    # 4xx는 일시적 오류라 잠시 뒤 다시 시도할 수 있습니다.
     if code // 100 == 4:
         delay = retry_delay()
         return 503, f"메일 서버가 혼잡합니다. {delay}초 후 다시 시도해주세요.", delay
+    # Gmail 하루 발송 한도 초과
     if text.lstrip().startswith("5.4.5"):
         return 503, "오늘은 인증 메일을 더 보낼 수 없습니다. 내일 다시 시도해주세요.", None
+    # 받는 주소가 없거나 잘못된 경우
     if isinstance(error, smtplib.SMTPRecipientsRefused) or text.lstrip().startswith("5.1."):
         return 400, "이메일 주소를 확인해주세요.", None
     return 503, "메일을 보내지 못했습니다. 관리자에게 문의해주세요.", None
