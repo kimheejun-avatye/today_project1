@@ -10,6 +10,7 @@ from app.db.session import Base,engine,Session
 from app.models import Verification,LoginSession,RefreshToken,now
 from sqlalchemy import select
 import pytest
+import smtplib
 
 @pytest.fixture(autouse=True)
 def fresh(monkeypatch):
@@ -126,7 +127,16 @@ def test_csrf_origin_reset_and_google_only(client):
 def test_login_backoff(client):
     signup(client)
     for _ in range(5):assert post(client,'/auth/login',{'email':'one@example.com','password':'wrong'}).status_code==401
-    assert post(client,'/auth/login',{'email':'one@example.com','password':'long-password-123'}).status_code==429
+    r=post(client,'/auth/login',{'email':'one@example.com','password':'long-password-123'})
+    assert r.status_code==429 and 1<=int(r.headers['retry-after'])<=30
+
+def test_resend_limit_reports_remaining_seconds(client):
+    assert post(client,'/auth/email/request',{'email':'one@example.com','purpose':'SIGNUP'}).status_code==200
+    r=post(client,'/auth/email/request',{'email':'one@example.com','purpose':'SIGNUP'})
+    assert r.status_code==429 and 1<=int(r.headers['retry-after'])<=60
+    wrong=post(client,'/auth/email/request',{'email':'two@example.com','purpose':'SIGNUP'}).json()
+    r=post(client,'/auth/email/verify',{'id':wrong['id'],'flow':wrong['flow'],'code':'000000'})
+    assert r.status_code==400 and 'retry-after' not in r.headers
 
 def test_verification_failures_survive_resend(client):
     data=post(client,'/auth/email/request',{'email':'a@example.com'}).json()
@@ -515,3 +525,22 @@ def test_share_requires_content_and_exposes_diary_to_other_member(client):
     response=client.put(path,json={**empty,'shared':False,'status':'DRAFT','version':1},headers=headers)
     assert response.status_code==200
     assert client.get('/api/community').json()==[]
+
+@pytest.mark.parametrize('error,status,retry',[
+    (smtplib.SMTPResponseException(421,b'4.7.0 Try again later'),503,True),
+    (smtplib.SMTPServerDisconnected('closed'),503,True),
+    (TimeoutError(),503,True),
+    (smtplib.SMTPDataError(550,b'5.4.5 Daily user sending limit exceeded'),503,False),
+    (smtplib.SMTPRecipientsRefused({'x@example.com':(550,b'5.1.1 The email account does not exist')}),400,False),
+    (smtplib.SMTPAuthenticationError(535,b'5.7.8 Username and Password not accepted'),503,False),
+])
+def test_smtp_failures_are_classified(monkeypatch,caplog,error,status,retry):
+    from app.services import mail
+    from fastapi import HTTPException
+    def broken():raise error
+    monkeypatch.setattr(mail,'connect',broken)
+    with pytest.raises(HTTPException) as raised:mail.submit('x@example.com','subject','body')
+    headers=raised.value.headers or {}
+    assert raised.value.status_code==status and ('Retry-After' in headers)==retry
+    if retry:assert 30<=int(headers['Retry-After'])<=60 and headers['Retry-After'] in raised.value.detail
+    assert 'x@example.com' not in caplog.text

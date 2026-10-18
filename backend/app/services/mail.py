@@ -1,10 +1,14 @@
 """SMTP delivery and safe configuration status; never silently falls back to preview."""
 
+import logging
 import os
+import random
 import smtplib
 import ssl
 from email.message import EmailMessage
 from fastapi import HTTPException
+
+logger = logging.getLogger(__name__)
 
 
 def preview_enabled():
@@ -67,6 +71,33 @@ def connect():
         raise
 
 
+def retry_delay():
+    # SMTP는 다음 시도 시각을 알려주지 않아 사용자 재시도가 한꺼번에 몰리지 않게 흩뜨립니다.
+    return 30 + random.randint(0, 30)
+
+
+def classify(error):
+    """SMTP 실패를 (응답 상태, 안내 문구, 재시도 대기 초 또는 None)으로 나눕니다."""
+    if isinstance(error, smtplib.SMTPAuthenticationError):
+        return 503, "메일 발송 설정에 문제가 있습니다. 관리자에게 문의해주세요.", None
+    if isinstance(error, smtplib.SMTPRecipientsRefused):
+        code, message = next(iter(error.recipients.values()))
+    elif isinstance(error, smtplib.SMTPResponseException):
+        code, message = error.smtp_code, error.smtp_error
+    else:
+        delay = retry_delay()
+        return 503, f"메일 서버에 연결하지 못했습니다. {delay}초 후 다시 시도해주세요.", delay
+    text = message.decode(errors="replace") if isinstance(message, bytes) else str(message)
+    if code // 100 == 4:
+        delay = retry_delay()
+        return 503, f"메일 서버가 혼잡합니다. {delay}초 후 다시 시도해주세요.", delay
+    if text.lstrip().startswith("5.4.5"):
+        return 503, "오늘은 인증 메일을 더 보낼 수 없습니다. 내일 다시 시도해주세요.", None
+    if isinstance(error, smtplib.SMTPRecipientsRefused) or text.lstrip().startswith("5.1."):
+        return 400, "이메일 주소를 확인해주세요.", None
+    return 503, "메일을 보내지 못했습니다. 관리자에게 문의해주세요.", None
+
+
 def submit(email, subject, content):
     msg = EmailMessage()
     msg["Subject"] = subject
@@ -75,17 +106,18 @@ def submit(email, subject, content):
     msg.set_content(content)
     try:
         with connect() as smtp:
-            refused = smtp.send_message(msg)
-            if refused:
-                raise HTTPException(503, "메일 서비스가 수신 주소를 거절했습니다.")
-    except smtplib.SMTPAuthenticationError:
-        raise HTTPException(
-            503, "메일 발송 계정 인증에 실패했습니다. 발송 설정을 확인해주세요."
-        )
-    except (OSError, smtplib.SMTPException):
-        raise HTTPException(
-            503, "메일 발송 결과를 확인하지 못했습니다. 잠시 후 재요청하세요."
-        )
+            # 수신자가 한 명이라 거절되면 반환값이 아니라 SMTPRecipientsRefused가 발생합니다.
+            smtp.send_message(msg)
+    except (OSError, smtplib.SMTPException) as error:
+        status, message, delay = classify(error)
+        # 수신 주소가 담긴 예외 전체 대신 코드와 서버 메시지만 남깁니다.
+        if isinstance(error, smtplib.SMTPRecipientsRefused):
+            detail = next(iter(error.recipients.values()))
+        else:
+            detail = (getattr(error, "smtp_code", None), getattr(error, "smtp_error", None))
+        logger.warning("SMTP 발송 실패: %s %s", type(error).__name__, detail)
+        headers = {"Retry-After": str(delay)} if delay else None
+        raise HTTPException(status, message, headers=headers)
 
 
 def send_code(email, code):
